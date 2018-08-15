@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 from builtins import *
+from future.utils import iteritems
 import six
 # pragma pylint: enable=redefined-builtin
 # pragma pylint: enable=unused-wildcard-import
@@ -291,9 +292,9 @@ def get_raw_frame_number(raw_frame_rate, raw_frame_count, fps, sampled_frame):
     '''Get the raw frame number corresponding to the given sampled frame
     number.
 
-    This function assumes that the sampling was performed using the command
+    This function assumes that the sampling was performed using the command:
     ```
-    FFmpegVideoSampler(fps).run(raw_video_path, ...)
+    FFmpeg(fps=fps).run(raw_video_path, ...)
     ```
 
     Args:
@@ -312,85 +313,116 @@ def get_raw_frame_number(raw_frame_rate, raw_frame_count, fps, sampled_frame):
     return int(raw_frame)
 
 
-def sample_first_frames(inpath, k, size=None):
+def sample_first_frames(arg, k, size=None):
     '''Samples the first k frames in a video.
 
     Args:
-        inpath: path to the input video
+        arg: can be either the path to the input video or an array of frames
+            of size [num_frames, height, width, num_channels]
         k: number of frames to extract
         size: an optional [width, height] to resize the sampled frames. By
             default, the native dimensions of the frames are used
 
     Returns:
-        A numpy array of size [k, height, width]
+        A numpy array of size [k, height, width, num_channels]
     '''
-    imgs = []
-    frames = "1-%d" % k
-    with FFmpegVideoReader(inpath, frames=frames) as vr:
-        for img in vr:
-            if size:
-                img = etai.resize(img, *size)
-            imgs.append(img)
+    # Read frames ...
+    if isinstance(arg, six.string_types):
+        # ... from disk
+        with FFmpegVideoReader(arg, frames="1-%d" % k) as vr:
+            imgs = [img for img in vr]
+    else:
+        # ... from tensor
+        imgs = arg[:k]
+
+    # Resize frames, if necessary
+    if size:
+        imgs = [etai.resize(img, *size) for img in imgs]
+
     return np.array(imgs)
 
 
-def uniformly_sample_frames(inpath, k, size=None):
+def uniformly_sample_frames(arg, k, size=None):
     '''Uniformly samples k frames from the video, always including the first
     and last frames.
 
     Args:
-        inpath: path to the input video
+        arg: can be either the path to the input video or an array of frames
+            of size [num_frames, height, width, num_channels]
         k: the number of frames to extract
         size: an optional [width, height] to resize the sampled frames. By
             default, the native dimensions of the frames are used
 
     Returns:
-        A numpy array of size [k, height, width]
+        A numpy array of size [k, height, width, num_channels]
     '''
-    imgs = []
-    num_frames = get_frame_count(inpath)
-    frames = [int(round(i)) for i in np.linspace(1, num_frames, k)]
-    with FFmpegVideoReader(inpath, frames=frames) as vr:
-        for img in vr:
-            if size:
-                img = etai.resize(img, *size)
-            imgs.append(img)
+    is_video_file = isinstance(arg, six.string_types)
+
+    # Compute 1-based frames
+    num_frames = get_frame_count(arg) if is_video_file else len(arg)
+    frames = [int(round(i)) for i in np.linspace(1, min(num_frames, k), k)]
+
+    # Read frames ...
+    if is_video_file:
+        # ... from disk
+        with FFmpegVideoReader(arg, frames=frames) as vr:
+            imgs = [img for img in vr]
+    else:
+        # ... from tensor
+        imgs = [arg[f - 1] for f in frames]
+
+    # Resize frames, if necessary
+    if size:
+        imgs = [etai.resize(img, *size) for img in imgs]
+
     return np.array(imgs)
 
 
-def sliding_window_sample_frames(inpath, k, stride, size=None):
+def sliding_window_sample_frames(arg, k, stride, size=None):
     '''Samples clips from the video using a sliding window of the given
     length and stride.
 
     Args:
-        inpath: path to the input video
+        arg: can be either the path to the input video or an array of frames
+            of size [num_frames, height, width, num_channels]
         k: the size of each window
         stride: the stride for sliding window
         size: an optional [width, height] to resize the sampled frames. By
             default, the native dimensions of the frames are used
 
     Returns:
-        A numpy array of size [XXXX, k, height, width]
+        A numpy array of size [XXXX, k, height, width, num_channels]
     '''
+    is_video_file = isinstance(arg, six.string_types)
+
     # Determine clip indices
-    num_frames = get_frame_count(inpath)
+    num_frames = get_frame_count(arg) if is_video_file else len(arg)
     delta = np.arange(1, k + 1)
     offsets = np.array(list(range(0, num_frames + 1 - k, stride)))
     clip_inds = offsets[:, np.newaxis] + delta[np.newaxis, :]
+    frames = list(np.unique(clip_inds))
 
-    # Read frames
+    # Read frames ...
     imgs = {}
-    frames = list(np.unique(clip_inds))  # only read the necessary frames
-    with FFmpegVideoReader(inpath, frames=frames) as vr:
-        for img in vr:
-            if size:
-                img = etai.resize(img, *size)
-            imgs[vr.frame_number] = img
+    if is_video_file:
+        # ... from disk
+        with FFmpegVideoReader(arg, frames=frames) as vr:
+            for img in vr:
+                imgs[vr.frame_number] = img
+    else:
+        # ... from tensor
+        for fn in frames:
+            imgs[fn] = arg[fn - 1]
+
+    # Resize frames, if necessary
+    if size:
+        imgs = {fn: etai.resize(img, *size) for fn, img in iteritems(imgs)}
 
     # Generate clips tensor
     clips = []
     for inds in clip_inds:
         clips.append(np.array([imgs[k] for k in inds]))
+
     return np.array(clips)
 
 
@@ -409,7 +441,7 @@ class VideoProcessor(object):
     def __init__(
             self,
             inpath,
-            frames="*",
+            frames=None,
             in_use_ffmpeg=True,
             out_use_ffmpeg=True,
             out_images_path=None,
@@ -422,8 +454,8 @@ class VideoProcessor(object):
 
         Args:
             inpath: path to the input video. Passed directly to a VideoReader
-            frames: a string specifying the range(s) of frames to process.
-                Passed directly to a VideoReader
+            frames: an optional string specifying the range(s) of frames to
+                process. Passed directly to a VideoReader
             in_use_ffmpeg: whether to use FFmpegVideoReader to read input
                 videos rather than OpenCVVideoReader
             out_use_ffmpeg: whether to use FFmpegVideoWriter to write output
@@ -445,7 +477,7 @@ class VideoProcessor(object):
                 source is a video and fps is None, the same frame rate is used
             out_size: the frame size for the output video, if any. If out_size
                 is None, the input frame size is assumed
-            out_opts: a list of output video options for ffmpeg. Passed
+            out_opts: a list of output video options for FFmpeg. Passed
                 directly to FFmpegVideoWriter. Only applicable when
                 out_use_ffmpeg = True
 
@@ -595,7 +627,6 @@ class VideoReader(object):
             # Frames string
             if frames == "*":
                 frames = "1-%d" % self.total_frame_count
-
             self.frames = frames
             self._ranges = FrameRanges.from_str(frames)
         elif isinstance(frames, list):
@@ -669,7 +700,7 @@ class FFmpegVideoReader(VideoReader):
     '''Class for reading video using ffmpeg.
 
     The input video can be a standalone video file like "/path/to/video.mp4"
-    or a directory of frames like "/path/to/frames/%5d.png". This path is
+    or a directory of frames like "/path/to/frames/%05d.png". This path is
     passed directly to ffmpeg.
 
     A frames string like "1-5,10-15" can optionally be passed to only read
@@ -678,18 +709,18 @@ class FFmpegVideoReader(VideoReader):
     This class uses 1-based indexing for all frame operations.
     '''
 
-    def __init__(self, inpath, frames="*"):
+    def __init__(self, inpath, frames=None):
         '''Constructs a new VideoReader with ffmpeg backend.
 
         Args:
             inpath: path to the input video, which can be a standalone video
                 file like "/path/to/video.mp4" or a directory of frames like
-                "/path/to/frames/%5d.png". This path is passed directly to
+                "/path/to/frames/%05d.png". This path is passed directly to
                 ffmpeg
             frames: one of the following optional quantities specifying a
                 collection of frames to process:
-                    - None (all frames)
-                    - "*" (all frames - the default)
+                    - None (all frames - the default)
+                    - "*" (all frames)
                     - a string like "1-3,6,8-10"
                     - a list like [1, 2, 3, 6, 8, 9, 10]
                     - a FrameRange or FrameRanges instance
@@ -771,7 +802,7 @@ class OpenCVVideoReader(VideoReader):
     '''Class for reading video using OpenCV.
 
     The input video can be a standalone video file like "/path/to/video.mp4"
-    or a directory of frames like "/path/to/frames/%5d.png". This path is
+    or a directory of frames like "/path/to/frames/%05d.png". This path is
     passed directly to cv2.VideoCapture. So, for example, if you specify a
     directory of frames, the frame numbering must start from 0-3.
 
@@ -781,18 +812,18 @@ class OpenCVVideoReader(VideoReader):
     This class uses 1-based indexing for all frame operations.
     '''
 
-    def __init__(self, inpath, frames="*"):
+    def __init__(self, inpath, frames=None):
         '''Constructs a new VideoReader with OpenCV backend.
 
         Args:
             inpath: path to the input video, which can be a standalone video
                 file like "/path/to/video.mp4" or a directory of frames like
-                "/path/to/frames/%5d.png". This path is passed directly to
+                "/path/to/frames/%05d.png". This path is passed directly to
                 cv2.VideoCapture
             frames: one of the following optional quantities specifying a
                 collection of frames to process:
-                    - None (all frames)
-                    - "*" (all frames - the default)
+                    - None (all frames - the default)
+                    - "*" (all frames)
                     - a string like "1-3,6,8-10"
                     - a list like [1, 2, 3, 6, 8, 9, 10]
                     - a FrameRange or FrameRanges instance
@@ -897,11 +928,6 @@ class VideoWriterError(Exception):
 class FFmpegVideoWriter(VideoWriter):
     '''Class for writing videos using ffmpeg.'''
 
-    DEFAULT_OUT_OPTS = [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "medium", "-crf", "23", "-an",
-    ]
-
     def __init__(self, outpath, fps, size, out_opts=None):
         '''Constructs a VideoWriter with ffmpeg backend.
 
@@ -910,13 +936,11 @@ class FFmpegVideoWriter(VideoWriter):
                 and the directory is created if necessary
             fps: the frame rate
             size: the (width, height) of each frame
-            out_opts: A list of output options for ffmpeg. If not specified,
-                the DEFAULT_OUT_OPTS list is used
+            out_opts: an optional list of output options for FFmpeg
         '''
         self.outpath = outpath
         self.fps = fps
         self.size = size
-        self.out_opts = out_opts or self.DEFAULT_OUT_OPTS
 
         self._ffmpeg = FFmpeg(
             in_opts=[
@@ -926,7 +950,7 @@ class FFmpegVideoWriter(VideoWriter):
                 "-pix_fmt", "rgb24",        # pixel format
                 "-r", str(self.fps),        # frame rate
             ],
-            out_opts=self.out_opts,
+            out_opts=out_opts,
         )
         self._ffmpeg.run("-", self.outpath)
 
@@ -990,21 +1014,14 @@ class FFprobe(object):
 
     DEFAULT_GLOBAL_OPTS = ["-loglevel", "error"]
 
-    def __init__(
-            self,
-            executable="ffprobe",
-            global_opts=None,
-            opts=None,
-    ):
+    def __init__(self, global_opts=None, opts=None):
         '''Constructs an ffprobe command, minus the input path.
 
         Args:
-            executable: the system path to the ffprobe binary
             global_opts: a list of global options for ffprobe. By default,
                 self.DEFAULT_GLOBAL_OPTS is used
             opts: a list of options for ffprobe
         '''
-        self._executable = executable
         self._global_opts = global_opts or self.DEFAULT_GLOBAL_OPTS
         self._opts = opts or []
 
@@ -1035,7 +1052,7 @@ class FFprobe(object):
                 during execution
         '''
         self._args = (
-            [self._executable] +
+            ["ffprobe"] +
             self._global_opts +
             self._opts +
             ["-i", inpath]
@@ -1049,7 +1066,7 @@ class FFprobe(object):
             )
         except EnvironmentError as e:
             if e.errno == errno.ENOENT:
-                raise etau.ExecutableNotFoundError(self._executable)
+                raise etau.ExecutableNotFoundError("ffprobe")
             else:
                 raise
 
@@ -1066,33 +1083,60 @@ class FFprobeError(Exception):
 
 
 class FFmpeg(object):
-    '''Interface for the ffmpeg binary.'''
+    '''Interface for the ffmpeg binary.
+
+    Example usages:
+        # Convert a video to sampled frames
+        ffmpeg = = FFmpeg()
+        ffmpeg.run("/path/to/video.mp4", "/path/to/frames/%05d.png")
+
+        # Resize a video
+        ffmpeg = FFmpeg(size=(512, -1))
+        ffmpeg.run("/path/to/video.mp4", "/path/to/resized.mp4")
+
+        # Change the frame rate of a video
+        ffmpeg = FFmpeg(fps=10)
+        ffmpeg.run("/path/to/video.mp4", "/path/to/resampled.mp4")
+    '''
 
     DEFAULT_GLOBAL_OPTS = ["-loglevel", "error"]
 
+    DEFAULT_VIDEO_OUT_OPTS = [
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-an"]
+
     def __init__(
             self,
-            executable="ffmpeg",
+            fps=None,
+            size=None,
+            scale=None,
             global_opts=None,
             in_opts=None,
-            out_opts=None,
-        ):
+            out_opts=None):
         '''Constructs an ffmpeg command, minus the input/output paths.
 
         Args:
-            executable: the system path to the ffmpeg binary
-            global_opts: a list of global options for ffmpeg. By default,
-                self.DEFAULT_GLOBAL_OPTS is used
-            in_opts: a list of input options for ffmpeg
-            out_opts: a list of output options for ffmpeg
+            fps: an optional output frame rate. By default, the native frame
+                rate of the input video is used
+            size: an optional output (width, height) for each frame. At most
+                one dimension can be -1, in which case the aspect ratio is
+                preserved
+            scale: an optional positive number by which to scale the input
+                video (e.g., 0.5 or 2)
+            global_opts: an optional list of global options for ffmpeg. By
+                default, self.DEFAULT_GLOBAL_OPTS is used
+            in_opts: an optional list of input options for ffmpeg
+            out_opts: an optional list of output options for ffmpeg. By
+                default, self.DEFAULT_VIDEO_OUT_OPTS is used when the output
+                path is a video file
         '''
         self.is_input_streaming = False
         self.is_output_streaming = False
 
-        self._executable = executable
+        self._filter_opts = self._gen_filter_opts(fps, size, scale)
         self._global_opts = global_opts or self.DEFAULT_GLOBAL_OPTS
         self._in_opts = in_opts or []
-        self._out_opts = out_opts or []
+        self._out_opts = out_opts
         self._args = None
         self._p = None
 
@@ -1122,22 +1166,27 @@ class FFmpeg(object):
         self.is_input_streaming = (inpath == "-")
         self.is_output_streaming = (outpath == "-")
 
+        if self._out_opts is None and is_supported_video_file(outpath):
+            out_opts = self.DEFAULT_VIDEO_OUT_OPTS
+        else:
+            out_opts = self._out_opts or []
+
         self._args = (
-            [self._executable] +
+            ["ffmpeg"] +
             self._global_opts +
             self._in_opts + ["-i", inpath] +
-            self._out_opts + [outpath]
+            self._filter_opts + out_opts + [outpath]
         )
 
         if not self.is_output_streaming:
             etau.ensure_path(outpath)
 
         try:
-            logger.debug("Excuting '%s'", self.cmd)
+            logger.debug("Excuting '%s'" % self.cmd)
             self._p = Popen(self._args, stdin=PIPE, stdout=PIPE, stderr=PIPE)
         except EnvironmentError as e:
             if e.errno == errno.ENOENT:
-                raise etau.ExecutableNotFoundError(self._executable)
+                raise etau.ExecutableNotFoundError("ffmpeg")
             else:
                 raise
 
@@ -1182,94 +1231,20 @@ class FFmpeg(object):
         self.is_input_streaming = False
         self.is_output_streaming = False
 
+    @staticmethod
+    def _gen_filter_opts(fps, size, scale):
+        filters = []
+        if fps is not None and fps > 0:
+            filters.append("fps={0}".format(fps))
+        if size:
+            filters.append("scale={0}:{1}".format(*size))
+        elif scale:
+            filters.append("scale=iw*{0}:ih*{0}".format(scale))
+        return ["-vf", ",".join(filters)] if filters else []
+
 
 class FFmpegStreamingError(Exception):
     pass
-
-
-class FFmpegVideoResizer(FFmpeg):
-    '''Class for resizing videos using ffmpeg.
-
-    Example usage:
-        resizer = FFmpegVideoResizer(size=(512, -1))
-        resizer.run("/path/to/video.mp4", "/path/to/resized.mp4")
-    '''
-
-    DEFAULT_OUT_OPTS = [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "medium", "-crf", "23", "-an",
-    ]
-
-    def __init__(
-            self, size=None, scale=None, scale_str=None, out_opts=None,
-            **kwargs):
-        '''Constructs a video resizer with ffmpeg backend.
-
-        Any one of the `size`, `scale`, and `scale_str` arguments can be
-        specified to define the resizing operation.
-
-        Args:
-            size: the output (width, height) of each frame. At most one
-                dimension can be -1, in which case the aspect ratio is
-                preserved
-            scale: a positive number by which to scale the input video
-                (e.g., 0.5 or 2)
-            scale_str: a string that directly specifies a valid ffmpeg scale=
-                option
-            out_opts: a list of output video options for ffmpeg. Passed
-                directly to FFmpeg. If omitted, the DEFAULT_OUT_OPTS are used
-            **kwargs: additional optional keyword arguments for FFmpeg
-        '''
-        if out_opts is None:
-            out_opts = self.DEFAULT_OUT_OPTS
-        scale_opt = self._gen_scale_opt(
-            size=size, scale=scale, scale_str=scale_str)
-        if scale_opt:
-            out_opts += ["-vf", "scale={0}".format(scale_opt)]
-        super(FFmpegVideoResizer, self).__init__(out_opts=out_opts, **kwargs)
-
-    @staticmethod
-    def _gen_scale_opt(size=None, scale=None, scale_str=None):
-        if size:
-            return "{0}:{1}".format(*size)
-        if scale:
-            return "iw*{0}:ih*{0}".format(scale)
-        if scale_str:
-            return scale_str
-
-        logger.info("No scale argument found; retaining the native resolution")
-        return None
-
-
-class FFmpegVideoSampler(FFmpeg):
-    '''Class for sampling videos using ffmpeg.
-
-    Example usage:
-        sampler = FFmpegVideoSampler(fps=10)
-        sampler.run("/path/to/video.mp4", "/path/to/sampled.mp4")
-    '''
-
-    DEFAULT_OUT_OPTS = [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-preset", "medium", "-crf", "23", "-an",
-    ]
-
-    def __init__(self, fps=None, out_opts=None, **kwargs):
-        '''Constructs a video sampler with ffmpeg backend.
-
-        Args:
-            fps: an optional sampling rate. By default, the native frame rate
-                of the video is used
-            out_opts: a list of output video options for ffmpeg. Passed
-                directly to FFmpeg. If omitted, the DEFAULT_OUT_OPTS are used
-            **kwargs: additional optional keyword arguments for FFmpeg
-        '''
-        if out_opts is None:
-            out_opts = self.DEFAULT_OUT_OPTS
-        if fps is not None and fps > 0:
-            out_opts += ["-vf", "fps={0}".format(fps)]
-
-        super(FFmpegVideoSampler, self).__init__(out_opts=out_opts, **kwargs)
 
 
 class FOURCC(object):

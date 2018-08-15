@@ -88,6 +88,7 @@ class ConcreteDataParams(object):
 
     def __init__(self):
         self._params = {
+            "name": None,
             "idx": eta.config.default_sequence_idx,
             "image_ext": eta.config.default_image_ext,
             "video_ext": eta.config.default_video_ext,
@@ -102,14 +103,27 @@ class ConcreteDataParams(object):
         '''
         return self._params
 
-    def render_for(self, name):
+    def render_for(self, name, hint=None):
         '''Render the type parameters for use with field `name`.
+
+        Args:
+            name: the field name
+            hint: an optional path hint from which to infer custom parameter
+                values (e.g. sequence indices or image/video extensions)
 
         Returns:
             a params dict
         '''
         params = self._params.copy()
         params["name"] = name
+        if hint:
+            hint_idx = etau.parse_sequence_idx_from_pattern(hint)
+            if hint_idx:
+                params["idx"] = hint_idx
+            if etai.is_supported_image(hint):
+                params["image_ext"] = os.path.splitext(hint)[1]
+            if etav.is_supported_video_file(hint):
+                params["video_ext"] = os.path.splitext(hint)[1]
         return params
 
 
@@ -531,7 +545,6 @@ class NpzFileDirectory(Directory):
     Examples:
         /path/to/npz_files
     '''
-
     pass
 
 
@@ -581,7 +594,6 @@ class VideoStreamInfo(JSONFile):
     Examples:
         /path/to/video-stream-info.json
     '''
-
     pass
 
 
@@ -594,7 +606,6 @@ class EventDetection(JSONFile):
     Examples:
         /path/to/event_detection.json
     '''
-
     pass
 
 
@@ -606,7 +617,29 @@ class EventSeries(JSONFile):
     Examples:
         /path/to/event_series.json
     '''
+    pass
 
+
+class FrameLabel(JSONFile):
+    '''A frame label in a video.
+
+    This type is implemented in ETA by the `eta.core.frames.FrameLabel` class.
+
+    Examples:
+        /path/to/frame_label.json
+    '''
+    pass
+
+
+class FrameLabels(JSONFile):
+    '''A list of frame labels in a video.
+
+    This type is implemented in ETA by the
+    `eta.core.frames.FrameLabelContainer` class.
+
+    Examples:
+        /path/to/frame_labels.json
+    '''
     pass
 
 
@@ -619,7 +652,6 @@ class DetectedObject(JSONFile):
     Examples:
         /path/to/detected_object.json
     '''
-
     pass
 
 
@@ -632,7 +664,6 @@ class DetectedObjects(JSONFile):
     Examples:
         /path/to/detected_objects.json
     '''
-
     pass
 
 
@@ -643,94 +674,6 @@ class DetectedObjectsSequence(JSONFileSequence):
     Examples:
         /path/to/detected_objects/%05d.json
     '''
-
-    pass
-
-
-class EmbeddedFrame(JSONFile):
-    '''Embedded objects in a frame.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/embedded_frame.json
-    '''
-
-    pass
-
-
-class EmbeddedFrameSequence(JSONFileSequence):
-    '''Embedded objects in a video represented as a collection of EmbeddedFrame
-    files indexed by one numeric parameter.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/embedded_frames/%05d.json
-    '''
-
-    pass
-
-
-class IndexedFrame(JSONFile):
-    '''Indexed objects in a frame.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/indexed_frame.json
-    '''
-
-    pass
-
-
-class IndexedFrameSequence(JSONFileSequence):
-    '''Indexed objects in a video represented as a collection of IndexedFrame
-    files indexed by one numeric parameter.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/indexed_frames/%05d.json
-    '''
-
-    pass
-
-
-class TrackedObjects(JSONFile):
-    '''Tracked objects in a frame.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/tracked_objects.json
-    '''
-
-    pass
-
-
-class TrackedObjectsSequence(JSONFileSequence):
-    '''Tracked objects in a video represented as a collection of TrackedObjects
-    files indexed by one numeric parameter.
-
-    @todo delete this deprecated type
-
-    Emamples:
-        /path/to/tracked_objects/%05d.json
-    '''
-
-    pass
-
-
-class Trace(JSONFile):
-    '''Trace describing a tracked object in a video.
-
-    @todo delete this deprecated type
-
-    Examples:
-        /path/to/trace.json
-    '''
-
     pass
 
 
@@ -781,7 +724,6 @@ class VideoDirectory(Directory):
     Examples:
         /path/to/videos
     '''
-
     pass
 
 
@@ -791,7 +733,6 @@ class ImageSequenceDirectory(Directory):
     Examples:
         /path/to/images
     '''
-
     pass
 
 
@@ -802,7 +743,6 @@ class DualImageSequenceDirectory(Directory):
     Examples:
         /path/to/dual-images
     '''
-
     pass
 
 
@@ -812,7 +752,6 @@ class JSONDirectory(Directory):
     Examples:
         /path/to/jsons
     '''
-
     pass
 
 
@@ -822,7 +761,6 @@ class DetectedObjectsSequenceDirectory(JSONDirectory):
     Examples:
         /path/to/detected_objects
     '''
-
     pass
 
 
@@ -833,7 +771,6 @@ class VideoObjectsFeaturesDirectory(Directory):
     Examples:
         /path/to/features
     '''
-
     pass
 
 
@@ -859,7 +796,6 @@ class ZippedDirectory(ZipFile):
     Examples:
         /path/to/dir.zip
     '''
-
     pass
 
 
@@ -869,7 +805,6 @@ class ZippedVideoFileDirectory(ZippedDirectory):
     Examples:
         /path/to/videos.zip
     '''
-
     pass
 
 
@@ -879,7 +814,6 @@ class ZippedImageSequenceDirectory(ZippedDirectory):
     Examples:
         /path/to/images.zip
     '''
-
     pass
 
 
@@ -890,7 +824,6 @@ class ZippedDualImageSequenceDirectory(ZippedDirectory):
     Examples:
         /path/to/dual-images.zip
     '''
-
     pass
 
 
@@ -900,7 +833,6 @@ class ZippedJSONDirectory(ZippedDirectory):
     Examples:
         /path/to/jsons.zip
     '''
-
     pass
 
 
@@ -911,7 +843,6 @@ class ZippedDetectedObjectsSequenceDirectory(ZippedDirectory):
     Examples:
         /path/to/detected_objects.zip
     '''
-
     pass
 
 
@@ -922,5 +853,4 @@ class ZippedVideoObjectsFeaturesDirectory(ZippedDirectory):
     Examples:
         /path/to/video-object-features.zip
     '''
-
     pass
