@@ -264,7 +264,7 @@ class PipelineMetadataConfig(Config):
         self.modules = self.parse_object_dict(
             d, "modules", PipelineModuleConfig)
         self.pipelines = self.parse_object_dict(
-            d, "pipelines", NestedPipelineConfig)
+            d, "pipelines", NestedPipelineConfig, default={})
         self.connections = self.parse_object_array(
             d, "connections", PipelineConnectionConfig)
 
