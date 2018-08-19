@@ -67,14 +67,13 @@ class BuildCommand(Command):
         # Build pipeline from a PipelineBuildRequest JSON file
         eta build -r '/path/to/pipeline/request.json'
 
-        # Build pipeline from a PipelineBuildRequest dictionary
-        eta build -r '{...}'
-
-        # Build the pipeline request interactively
+        # Build a pipeline request interactively, run it, and cleanup after
         eta build \\
             -n video_formatter \\
-            -i '{"video": "/path/to/video.mp4"}' \\
-            -p '{"format_videos.scale": 0.5}'
+            -i 'video="examples/data/water.mp4"' \\
+            -o 'formatted_video="water-small.mp4"' \\
+            -p 'format_videos.scale=0.5' \\
+            --run-now --cleanup
     '''
 
     @staticmethod
@@ -85,19 +84,22 @@ class BuildCommand(Command):
         parser.add_argument("-n", "--name", help="pipeline name")
         parser.add_argument(
             "-i", "--inputs", type=etas.load_json,
-            metavar="'{\"key\": val, ...}'", help="pipeline inputs")
+            metavar="'key=val,...'", help="pipeline inputs")
         parser.add_argument(
             "-o", "--outputs", type=etas.load_json,
-            metavar="'{\"key\": val, ...}'", help="pipeline outputs")
+            metavar="'key=val,...'", help="pipeline outputs")
         parser.add_argument(
             "-p", "--parameters", type=etas.load_json,
-            metavar="'{\"key\": val, ...}'", help="pipeline parameters")
+            metavar="'key=val,...'", help="pipeline parameters")
         parser.add_argument(
             "-e", "--eta-config", type=etas.load_json,
-            metavar="'{\"key\": val, ...}'", help="ETA config settings")
+            metavar="'key=val,...'", help="ETA config settings")
         parser.add_argument(
             "-l", "--logging", type=etas.load_json,
-            metavar="'{\"key\": val, ...}'", help="logging config settings")
+            metavar="'key=val,...'", help="logging config settings")
+        parser.add_argument(
+            "-u", "--unoptimized", action="store_true",
+            help="don't optimize the pipeline when building")
         parser.add_argument(
             "--run-now", action="store_true",
             help="run the pipeline after building")
@@ -142,12 +144,17 @@ class BuildCommand(Command):
         # Build pipeline
         logger.info("Building pipeline '%s'", request.pipeline)
         builder = etab.PipelineBuilder(request)
-        builder.build()
+        optimized = not args.unoptimized
+        builder.build(optimized=optimized)
 
         if args.run_now:
             # Run pipeline
             logger.info("Running pipeline '%s'", request.pipeline)
             builder.run()
+        else:
+            logger.info(
+                "\n***** To run this pipeline *****\neta run -c %s\n",
+                builder.pipeline_config_path)
 
         if args.cleanup:
             # Cleanup pipeline files
@@ -160,17 +167,80 @@ class RunCommand(Command):
 
     Examples:
         # Run the pipeline defined by a PipelineConfig JSON file
-        eta run '/path/to/pipeline.json'
+        eta run -c '/path/to/pipeline.json'
+
+        # Run the last built pipeline
+        eta run --last
     '''
 
     @staticmethod
     def setup(parser):
-        parser.add_argument("config", help="path to a PipelineConfig file")
+        parser.add_argument(
+            "-c", "--config", help="path to a PipelineConfig file")
+        parser.add_argument(
+            "-l", "--last", action="store_true",
+            help="run the last built pipeline")
 
     @staticmethod
     def run(args):
-        logger.info("Running ETA pipeline '%s'", args.config)
-        etap.run(args.config)
+        if args.config:
+            _run_pipeline(args.config)
+
+        if args.last:
+            config = etab.find_last_built_pipeline()
+            if config:
+                _run_pipeline(args.config)
+            else:
+                logger.info("No built pipelines found...")
+
+
+def _run_pipeline(config):
+    logger.info("Running ETA pipeline '%s'", config)
+    etap.run(config)
+
+    logger.info(
+        "\n***** To clean this pipeline *****\neta clean -c %s\n", config)
+
+
+class CleanCommand(Command):
+    '''Command-line tool for cleaning up after ETA pipelines.
+
+    Examples:
+        # Cleanup the pipeline defined by a PipelineConfig JSON file
+        eta clean -c '/path/to/pipeline.json'
+
+        # Cleanup the last built pipeline
+        eta clean --last
+
+        # Cleanup all built pipelines
+        eta clean --all
+    '''
+
+    @staticmethod
+    def setup(parser):
+        parser.add_argument(
+            "-c", "--config", help="path to a PipelineConfig file")
+        parser.add_argument(
+            "-l", "--last", action="store_true",
+            help="cleanup the last built pipeline")
+        parser.add_argument(
+            "-a", "--all", action="store_true",
+            help="cleanup all built pipelines")
+
+    @staticmethod
+    def run(args):
+        if args.config:
+            etab.cleanup_pipeline(args.config)
+
+        if args.last:
+            config = etab.find_last_built_pipeline()
+            if config:
+                etab.cleanup_pipeline(config)
+            else:
+                logger.info("No built pipelines found...")
+
+        if args.all:
+            etab.cleanup_all_pipelines()
 
 
 class ModelsCommand(Command):
@@ -386,6 +456,7 @@ subparsers = parser.add_subparsers(title="available commands")
 # Command setup
 _register_command("build", BuildCommand)
 _register_command("run", RunCommand)
+_register_command("clean", CleanCommand)
 _register_command("models", ModelsCommand)
 _register_command("modules", ModulesCommand)
 _register_command("pipelines", PipelinesCommand)
