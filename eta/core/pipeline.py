@@ -262,7 +262,7 @@ class PipelineMetadataConfig(Config):
         self.inputs = self.parse_array(d, "inputs")
         self.outputs = self.parse_array(d, "outputs")
         self.modules = self.parse_object_dict(
-            d, "modules", PipelineModuleConfig)
+            d, "modules", PipelineModuleConfig, default={})
         self.pipelines = self.parse_object_dict(
             d, "pipelines", NestedPipelineConfig, default={})
         self.connections = self.parse_object_array(
@@ -535,18 +535,101 @@ class PipelineModule(Configurable):
                 self.parameters[pparam.param_str] = pparam
 
     def _verify_has_parameters(self, param_names):
-        for name in param_names:
-            if not self.metadata.has_parameter(name):
+        for pname in param_names:
+            if not self.metadata.has_parameter(pname):
                 raise PipelineMetadataError(
                     "Module '%s' has no parameter '%s'" % (
-                        self.metadata.info.name, name))
+                        self.metadata.info.name, pname))
 
     def _verify_parameter_values(self, param_dict):
-        for name, val in iteritems(param_dict):
-            if not self.metadata.is_valid_parameter(name, val):
+        for pname, pval in iteritems(param_dict):
+            if not self.metadata.is_valid_parameter(pname, pval):
                 raise PipelineMetadataError(
                     "'%s' is an invalid value for parameter '%s' of module "
-                    "'%s'" % (val, name, self.metadata.info.name))
+                    "'%s'" % (pval, pname, self.metadata.info.name))
+
+
+class NestedPipeline(object):
+    '''Class representing a nested pipeline in a pipeline.
+
+    A nested pipeline definition is valid if every *required* parameter of its
+    constituent modules is "active", i.e., satisfies at least one of the
+    following conditions:
+        - the parameter is exposed to the end-user as tunable
+        - the parameter is set by the pipeline
+
+    Attributes:
+        name: the name of the nested pipeline within the parent pipeline
+        metadata: the PipelineMetadata instance for the nested pipeline
+        parameters: a dictionary mapping <pipeline>.<module>.<parameter>
+            strings to PipelineParameter instances describing the active
+            parameters
+    '''
+
+    def __init__(self, d):
+        self.name = self.parse_string(d, "name")
+        self.tunable_parameters = self.parse_array(d, "tunable_parameters")
+        self.set_parameters = self.parse_dict(d, "set_parameters")
+
+    def __init__(self, name, config):
+        '''Creates a NestedPipeline instance.
+
+        Args:
+            name: a name for the pipeline
+            config: a NestedPipelineConfig instance
+
+        Raises:
+            PipelineMetadataError: if the nested pipeline configuration was
+                invalid
+        '''
+        self.validate(config)
+
+        self.name = name
+        self.metadata = load_metadata(config.name)
+        self.parameters = {}
+
+        self._parse_parameters(
+            config.tunable_parameters, config.set_parameters)
+
+    def _parse_parameters(self, tunable_parameters, set_parameters):
+        # Verify parameter settings
+        self._verify_has_parameters(tunable_parameters)
+        self._verify_has_parameters(set_parameters.keys())
+        self._verify_parameter_values(set_parameters)
+
+        for pname, param in iteritems(self.metadata.parameters):
+            # Verify that required parameters are active
+            is_tunable = pname in tunable_parameters
+            is_set = pname in set_parameters
+            is_active = is_tunable or is_set
+            if param.is_required and not is_active:
+                raise PipelineMetadataError(
+                    "Required parameter '%s' of nested pipeline '%s' must be "
+                    "set or exposed as tunable" %
+                    (pname, self.metadata.info.name))
+
+            # Record active parameter
+            if is_active:
+                set_value = set_parameters[pname] if is_set else None
+                module, name = pname.split(".", 1)
+                pparam = PipelineParameter(
+                    module, name, param.param, is_tunable, set_value=set_value,
+                    pipeline=self.name)
+                self.parameters[pparam.param_str] = pparam
+
+    def _verify_has_parameters(self, param_names):
+        for pname in param_names:
+            if not self.metadata.has_tunable_parameter(pname):
+                raise PipelineMetadataError(
+                    "Nested pipeline '%s' has no parameter '%s'" % (
+                        self.metadata.info.name, pname))
+
+    def _verify_parameter_values(self, param_dict):
+        for pname, pval in iteritems(param_dict):
+            if not self.metadata.is_valid_parameter(pname, pval):
+                raise PipelineMetadataError(
+                    "'%s' is an invalid value for parameter '%s' of nested "
+                    "pipeline '%s'" % (pval, pname, self.metadata.info.name))
 
 
 class PipelineNode(object):
@@ -660,9 +743,9 @@ class PipelineMetadata(Configurable, HasBlockDiagram):
         info: a PipelineInfo instance describing the pipeline
         inputs: a dictionary mapping input names to PipelineInput instances
         outputs: a dictionary mapping output names to PipelineOutput instances
-        parameters: a dictionary mapping <module>.<parameter> strings to
-            PipelineParameter instances describing the *active* module
-            parameters of the pipeline
+        parameters: a dictionary mapping [<pipeline>.]<module>.<parameter>
+            strings to PipelineParameter instances describing the *active*
+            module parameters of the pipeline
         modules: a dictionary mapping module names to PipelineModule instances
         nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
             instances
@@ -819,39 +902,49 @@ class PipelineMetadata(Configurable, HasBlockDiagram):
         self.info = PipelineInfo(config.info)
 
         # Parse modules
-        for name, module_config in iteritems(config.modules):
-            module = PipelineModule(name, module_config)
-            self.modules[name] = module
+        for mname, module_config in iteritems(config.modules):
+            module = PipelineModule(mname, module_config)
+            self.modules[mname] = module
             self.parameters.update(module.parameters)
+
+        # Parse nested pipelines
+        for pname, pipeline_config in iteritems(config.pipelines):
+            pipeline = NestedPipeline(pname, pipeline_config)
+            self.nested_pipelines[pname] = pipeline
+            self.parameters.update(pipeline.parameters)
 
         # Parse connections
         for c in config.connections:
             # Parse nodes
             source = _parse_pipeline_node_str(
-                c.source, config.inputs, config.outputs, self.modules)
+                c.source, config.inputs, config.outputs, self.modules,
+                self.nested_pipelines)
             sink = _parse_pipeline_node_str(
-                c.sink, config.inputs, config.outputs, self.modules)
+                c.sink, config.inputs, config.outputs, self.modules,
+                self.nested_pipelines)
 
             # Make sure we don't duplicate nodes
             source = self._register_node(source)
             sink = self._register_node(sink)
 
             # Record connection
-            connection = _create_node_connection(source, sink, self.modules)
+            connection = _create_node_connection(
+                source, sink, self.modules, self.nested_pipelines)
             self.connections.append(connection)
 
         # Parse inputs
-        for name in config.inputs:
-            self.inputs[name] = _parse_input(
-                name, self.connections, self.modules)
+        for iname in config.inputs:
+            self.inputs[iname] = _parse_input(
+                iname, self.connections, self.modules, self.nested_pipelines)
 
         # Parse outputs
-        for name in config.outputs:
-            self.outputs[name] = _parse_output(
-                name, self.connections, self.modules)
+        for oname in config.outputs:
+            self.outputs[oname] = _parse_output(
+                oname, self.connections, self.modules, self.nested_pipelines)
 
         # Validate connections
-        _validate_module_connections(self.modules, self.connections)
+        _validate_connections(
+            self.modules, self.nested_pipelines, self.connections)
 
         # Compute execution order
         self.execution_order = _compute_execution_order(self.connections)
@@ -864,16 +957,18 @@ class PipelineMetadataError(Exception):
     pass
 
 
-def _parse_input(name, connections, modules):
+def _parse_input(name, connections, modules, nested_pipelines):
     '''Parses the pipeline input with the given name.
 
     A pipeline input is properly configured if it is connected to at least one
-    module input.
+    module input or nested pipeline input.
 
     Args:
         name: the pipeline input name
         connections: a list of PipelineConnection instances
-        modules: a dictionary mapping module names to ModuleMetadata instances
+        modules: a dictionary mapping module names to PipelineModule instances
+        nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
+            instances
 
     Returns:
         a PipelineInput instance describing the pipeline input
@@ -885,25 +980,28 @@ def _parse_input(name, connections, modules):
     sinks = _get_sinks_with_source(node_str, connections)
     if not sinks:
         raise PipelineMetadataError(
-            "Pipeline input '%s' is not connected to any modules" % name)
+            "Pipeline input '%s' is not connected to any modules or nested "
+            "pipelines" % name)
 
-    nodes = [
+    nodes = [ # @todo handle nested pipelines
         modules[sink.module].metadata.get_input(sink.node)
         for sink in sinks
     ]
     return PipelineInput(name, nodes)
 
 
-def _parse_output(name, connections, modules):
+def _parse_output(name, connections, modules, nested_pipelines):
     '''Parses the pipeline output with the given name.
 
     A pipeline output is properly configured if it is connected to exactly one
-    module output.
+    module output or nested pipeline output.
 
     Args:
         name: the pipeline output name
         connections: a list of PipelineConnection instances
-        modules: a dictionary mapping module names to ModuleMetadata instances
+        modules: a dictionary mapping module names to PipelineModule instances
+        nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
+            instances
 
     Returns:
         a PipelineOutput instance describing the pipeline output
@@ -915,26 +1013,28 @@ def _parse_output(name, connections, modules):
     sources = _get_sources_with_sink(node_str, connections)
     if len(sources) != 1:
         raise PipelineMetadataError(
-            "Pipeline output '%s' must be connected to exactly one module "
-            "output, but was connected to %d" % (name, len(sources))
-        )
+            "Pipeline output '%s' must be connected to exactly one module or"
+            "nested pipeline output, but was connected to %d" %
+            (name, len(sources)))
 
     source = sources[0]
-    node = modules[source.module].metadata.get_output(source.node)
+    node = modules[source.module].metadata.get_output(source.node) # @todo handle nested pipelines
     return PipelineOutput(name, node)
 
 
-def _validate_module_connections(modules, connections):
-    '''Ensures that the modules connections are valid.
+def _validate_connections(modules, nested_pipelines, connections):
+    '''Ensures that the pipeline connections are valid.
 
-    The module connections are valid if:
-        - every module input either has exactly one incoming connection or is
-            not required
-        - every module output either has at least one outgoing connection or
-            is not required
+    The connections are valid if:
+        - every module input or nested pipeline input either has exactly one
+            incoming connection or is not required
+        - every module output or nested pipeline output either has at least one
+            outgoing connection or is not required
 
     Args:
-        modules: a dictionary mapping module names to ModuleMetadata instances
+        modules: a dictionary mapping module names to PipelineModule instances
+        nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
+            instances
         connections: a list of PipelineConnection instances
 
     Raises:
@@ -963,6 +1063,10 @@ def _validate_module_connections(modules, connections):
                 raise PipelineMetadataError(
                     "Module '%s' output '%s' is required but has no outgoing "
                     "connections" % (mname, oname))
+
+    for pname, pipeline in iteritems(nested_pipelines):
+        # @todo handle nested pipelines
+        pass
 
 
 def _compute_execution_order(connections):
@@ -1043,7 +1147,8 @@ def _parse_module_node_str(node_str):
     return module, node
 
 
-def _parse_pipeline_node_str(node_str, inputs, outputs, modules):
+def _parse_pipeline_node_str(
+        node_str, inputs, outputs, modules, nested_pipelines):
     '''Parses a pipeline node string.
 
     Args:
@@ -1051,6 +1156,8 @@ def _parse_pipeline_node_str(node_str, inputs, outputs, modules):
         inputs: a list of pipeline inputs
         outputs: a list of pipeline outputs
         modules: a dictionary mapping module names to PipelineModule instances
+        nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
+            instances
 
     Returns:
         a PipelineNode instance describing the node
@@ -1089,13 +1196,15 @@ def _parse_pipeline_node_str(node_str, inputs, outputs, modules):
     return PipelineNode(module, node, _type)
 
 
-def _create_node_connection(source, sink, modules):
+def _create_node_connection(source, sink, modules, nested_pipelines):
     '''Creates a pipeline connection between two nodes.
 
     Args:
         source: the source PipelineNode
         sink: the sink PipelineNode
         modules: a dictionary mapping module names to PipelineModule instances
+        nested_pipelines: a dictionary mapping pipeline names to NestedPipeline
+            instances
 
     Returns:
         a PipelineConnection instance describing the connection
